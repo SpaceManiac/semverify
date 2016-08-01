@@ -1,5 +1,23 @@
 use std::fmt;
 
+pub fn parse_crate(file: &::std::path::Path) -> Option<::syntax::ast::Crate> {
+    use std::rc::Rc;
+    use syntax::codemap;
+    use syntax::parse::parser::Parser;
+    use syntax::parse::{lexer, ParseSess};
+    use syntax::errors::Handler;
+    use syntax::errors::emitter::ColorConfig;
+
+    let cm = Rc::new(codemap::CodeMap::new());
+    let sh = Handler::with_tty_emitter(ColorConfig::Never, None, false, false, Some(cm.clone()));
+    let ps = ParseSess::with_span_handler(sh, cm);
+    let fm = ps.codemap().load_file(file).unwrap();
+    let srdr = lexer::StringReader::new(&ps.span_diagnostic, fm);
+    let mut p = Parser::new(&ps, Vec::new(), Box::new(srdr));
+    // who knows why this is needed
+    (|p: &mut Parser| p.parse_crate_mod().ok())(&mut p)
+}
+
 #[derive(Copy, Clone)]
 pub struct Indent(usize);
 
@@ -12,12 +30,12 @@ impl Indent {
     }
 }
 
-const BLANK: &'static str = "                    ";
-
 impl fmt::Display for Indent {
     fn fmt(&self, fmt: &mut fmt::Formatter) -> fmt::Result {
+        const BLANK: &'static str = "                    ";
+
         let amt = self.0 * 2;
-        for _ in 0..amt / BLANK.len() {
+        for _ in 0 .. amt/BLANK.len() {
             try!(fmt.write_str(BLANK));
         }
         fmt.write_str(&BLANK[..amt % BLANK.len()])
