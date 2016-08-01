@@ -12,12 +12,18 @@ macro_rules! find_item_l {
     ($r:expr; $kind:tt $var:ident: $orig:expr; in $iter:expr; $b:block) => {{
         let name = $orig.ident.name;
         let (mut any_found, mut pub_found, mut kind_found) = (false, false, false);
+
+        let our_config = cfg::Config::new($r, &$orig.attrs);
+        let mut their_config = cfg::Config::False;
+
         for $var in $iter {
             if $var.ident.name == name {
                 any_found = true;
                 if is_public($var) {
                     pub_found = true;
-                    if cfg::intersects($r, &$orig.attrs, &$var.attrs) && $b {
+                    let current_config = cfg::Config::new($r, &$var.attrs);
+                    if our_config.intersects(&current_config) && $b {
+                        their_config.union(current_config);
                         kind_found = true;
                     }
                 }
@@ -30,6 +36,9 @@ macro_rules! find_item_l {
             push!($r, Breaking, "{} {} was made private", kind, name);
         } else if !kind_found {
             push!($r, Breaking, "{0} {1} is no longer a {0}", kind, name);
+        } else if !our_config.subset(&their_config) {
+            their_config.simplify(); // TODO: maybe move this down sometime
+            push!($r, Breaking, "{} {} has been narrowed:\n  Was: {:?}\n  Now: {:?}", kind, name, our_config, their_config);
         }
     }}
 }
