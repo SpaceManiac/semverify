@@ -2,36 +2,38 @@ use syntax::ast::*;
 use report::*;
 
 /// Check that targets covered by `old` are a subset of those by `new`.
-pub fn cfg_subset(r: &mut Report, old: &[Attribute], new: &[Attribute]) -> bool {
-    let new_cfg = match cfg_from_all_attrs(r, new) {
+pub fn subset(r: &mut Report, old: &[Attribute], new: &[Attribute]) -> bool {
+    let new_cfg = match cfg_from_attr_list(r, new) {
         Some(cfg) => cfg,
-        None => return true, // new is unconditional
+        None => return true, // new is universal
     };
-    let old_cfg = match cfg_from_all_attrs(r, old) {
+    let old_cfg = match cfg_from_attr_list(r, old) {
         Some(cfg) => cfg,
-        None => return false, // old is unconditional, but new is not
+        None => return false, // old is universal, but new is not
     };
-    push!(r, Note, "TODO: Compare #[cfg] trees with more detail");
+    push!(r, Debug, "TODO: Compare #[cfg] trees with more detail");
     push!(r, Debug, "Old = {:?}", old_cfg);
     push!(r, Debug, "New = {:?}", new_cfg);
     true
 }
 
-/// None = unencumbered by configs
-fn cfg_from_all_attrs(r: &mut Report, attrs: &[Attribute]) -> Option<Config> {
-    let all: Vec<Config> = attrs.iter().flat_map(|a| cfg_from_attr(r, a)).collect();
-    match all.len() {
-        0 | 1 => all.into_iter().next(),
-        _ => Some(Config::All(all)),
-    }
+/// Check whether the targets covered by `lhs` and `rhs` intersect whatsoever.
+pub fn intersects(r: &mut Report, lhs: &[Attribute], rhs: &[Attribute]) -> bool {
+    // TODO: improve efficiency
+    subset(r, lhs, rhs) || subset(r, rhs, lhs)
 }
 
-fn cfg_from_attr(r: &mut Report, attr: &Attribute) -> Option<Config> {
-    match attr.node.value.node {
+/// None = universal
+fn cfg_from_attr_list(r: &mut Report, attrs: &[Attribute]) -> Option<Config> {
+    let all: Vec<Config> = attrs.iter().flat_map(|attr| match attr.node.value.node {
         MetaItemKind::List(ref string, ref items) if &**string == "cfg" && items.len() == 1 => {
             Some(cfg_from_meta(r, &items[0].node))
         }
         _ => None
+    }).collect();
+    match all.len() {
+        0 | 1 => all.into_iter().next(),
+        _ => Some(Config::All(all)),
     }
 }
 

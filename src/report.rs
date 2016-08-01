@@ -6,12 +6,10 @@ pub enum Severity {
     Debug,
     /// Tool note
     Note,
-    /// Change requiring bumping of patch number
-    Patch,
+    /// Change requiring bumping of minor release number
+    Minor,
     /// Tool warning
     Warning,
-    /// Change requiring bumping of minor release number
-    Addition,
     /// Breaking change that is not considered to require a major release
     SemiBreaking,
     /// Change requiring bumping of major release number
@@ -42,10 +40,19 @@ impl Report {
 }
 
 macro_rules! push {
-    ($report:ident, $severity:ident, $($rest:tt)*) => {
+    ($report:expr, $severity:ident, $($rest:tt)*) => {
         $report.items.push(::report::ReportItem {
             severity: ::report::Severity::$severity,
             text: format!($($rest)*),
         })
+    }
+}
+
+macro_rules! changed {
+    ($report:expr, $severity:ident, $what:expr, ($was:expr => $now:expr) $($rest:tt)*) => {
+        push!($report, $severity,
+            concat!($what, " has changed:\n  Was: {:?}\n  Now: {:?}")
+            $($rest)*, $was, $now
+        )
     }
 }
