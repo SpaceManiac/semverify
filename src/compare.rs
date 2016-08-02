@@ -85,6 +85,8 @@ fn compare_mods(r: &mut Report, old: &Mod, new: &Mod) {
 
     let mut child_mods = Vec::new();
 
+    // TODO: include more detailed #[cfg] printouts in the messages
+
     // Major: "renaming/moving/removing any public items."
     // Check that every item is found at the same path in the new version, and
     // furthermore perform checks that the new item agrees with the old item
@@ -206,15 +208,79 @@ fn compare_mods(r: &mut Report, old: &Mod, new: &Mod) {
                 })
             }
             // Unhandled types
-            _ => push!(r, Note, "Item \"{}\" has unhandled kind: {}", item.ident, item.node.descriptive_variant()),
+            _ => push!(r, Warning, "Unhandled: {} \"{}\"", item.node.descriptive_variant(), item.ident),
         }
     }
 
-    // Look for additions
+    // "Minor change: adding new public items."
+    // All the heavy lifting of checking an old version vs. a new version is
+    // done above. Here are checks for new public items which did not exist
+    // before. Due to glob imports, these are technically Breaking, but it
+    // would impact report clarity to report this accurately. Instead, they
+    // are reported as Minor.
+    for item in &new.items {
+        if !is_public(item) { continue }
+
+        macro_rules! find_item {
+            ($kind:tt $var:ident; $b:block) => {{
+                let name = item.ident.name;
+                let (mut any_found, mut pub_found, mut kind_found) = (false, false, false);
+                let our_config = cfg::Config::new(r, &item.attrs);
+                let mut their_config = cfg::Config::False;
+
+                for $var in &old.items {
+                    if $var.ident.name == name {
+                        any_found = true;
+                        if is_public($var) {
+                            pub_found = true;
+                            let current_config = cfg::Config::new(r, &$var.attrs);
+                            if our_config.intersects(&current_config) && $b {
+                                their_config.union(current_config);
+                                kind_found = true;
+                            }
+                        }
+                    }
+                }
+                let kind = stringify!($kind);
+                if !any_found {
+                    push!(r, Major, "{} {} was added", kind, name);
+                } else if !pub_found {
+                    push!(r, Major, "{} {} was made public", kind, name);
+                } else if !kind_found {
+                    push!(r, Major, "{0} {1} is now a {0}", kind, name);
+                } else if !our_config.subset(&their_config) {
+                    their_config.simplify(); // TODO: maybe move this down sometime
+                    push!(r, Minor, "{} {} has been widened:\n  Was: {:?}\n  Now: {:?}", kind, name, their_config, our_config);
+                }
+            }}
+        }
+
+        match item.node {
+            // Child modules
+            Mod(ref module) => find_item!(mod old_item; {
+                match old_item.node { Mod(_) => true, _ => false }
+            }),
+            // Consts and statics
+            Const(ref ty, _) => find_item!(const old_item; {
+                match old_item.node { Const(..) | Static(..) => true, _ => false }
+            }),
+            Static(ref ty, mutability, _) => find_item!(static old_item; {
+                match old_item.node { Const(..) | Static(..) => true, _ => false }
+            }),
+            // Functions
+            Fn(ref decl, unsafety, constness, abi, ref generics, _) => find_item!(fn old_item; {
+                match old_item.node { Fn(..) => true, _ => false }
+            }),
+            // Unhandled types
+            _ => push!(r, Warning, "Unhandled: {} \"{}\"", item.node.descriptive_variant(), item.ident),
+        }
+    }
 
     // Recurse to child modules
     for (name, old_child, new_child) in child_mods {
-        compare_mods(r.nest(ReportItem::new(Severity::Note, format!("Inside mod {}", name))), old_child, new_child);
+        compare_mods(
+            r.nest(ReportItem::new(Severity::Note, format!("Inside mod {}", name))),
+            old_child, new_child);
     }
 }
 
