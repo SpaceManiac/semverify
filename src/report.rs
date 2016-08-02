@@ -1,7 +1,10 @@
-//! Report
+//! Reporting data structures
 
 use std::borrow::Cow;
 
+/// Ordered severity levels for report items.
+///
+/// The severity of a report item is determined by RFC 1105.
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug)]
 pub enum Severity {
     /// Tool debug
@@ -13,13 +16,14 @@ pub enum Severity {
     /// Tool warning
     Warning,
     /// Breaking change that is not considered to require a major release
-    SemiBreaking,
-    /// Change requiring bumping of major release number
     Breaking,
+    /// Change requiring bumping of major release number
+    Major,
     /// Tool error
     Error,
 }
 
+/// An informational entry in the report.
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub struct ReportItem {
     pub severity: Severity,
@@ -32,6 +36,7 @@ impl ReportItem {
     }
 }
 
+/// A node in the tree structure of the report.
 #[derive(Debug)]
 pub struct Report {
     pub item: ReportItem,
