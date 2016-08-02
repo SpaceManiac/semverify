@@ -32,12 +32,6 @@ impl Indent {
 
 impl fmt::Display for Indent {
     fn fmt(&self, fmt: &mut fmt::Formatter) -> fmt::Result {
-        const BLANK: &'static str = "                    ";
-
-        let amt = self.0 * 2;
-        for _ in 0 .. amt/BLANK.len() {
-            try!(fmt.write_str(BLANK));
-        }
-        fmt.write_str(&BLANK[..amt % BLANK.len()])
+        write!(fmt, "{:1$}", "", 2 * self.0)
     }
 }

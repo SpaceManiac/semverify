@@ -1,5 +1,7 @@
 //! Report
 
+use std::borrow::Cow;
+
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug)]
 pub enum Severity {
     /// Tool debug
@@ -21,29 +23,47 @@ pub enum Severity {
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub struct ReportItem {
     pub severity: Severity,
-    pub text: String,
+    pub text: Cow<'static, str>,
+}
+
+impl ReportItem {
+    pub fn new<S: Into<Cow<'static, str>>>(severity: Severity, message: S) -> ReportItem {
+        ReportItem { severity: severity, text: message.into() }
+    }
 }
 
 #[derive(Debug)]
 pub struct Report {
-    pub items: Vec<ReportItem>,
+    pub item: ReportItem,
+    pub children: Vec<Report>,
 }
 
 impl Report {
     pub fn new() -> Report {
-        Report { items: Vec::new() }
+        Report::from(ReportItem::new(Severity::Note, "Crate root"))
     }
 
-    pub fn max_severity(&self) -> Severity {
-        self.items.iter().map(|i| i.severity).max().unwrap_or(Severity::Note)
+    pub fn push(&mut self, child: ReportItem) {
+        self.children.push(child.into());
+    }
+
+    pub fn nest(&mut self, child: ReportItem) -> &mut Report {
+        self.children.push(child.into());
+        self.children.last_mut().unwrap()
+    }
+}
+
+impl From<ReportItem> for Report {
+    fn from(val: ReportItem) -> Report {
+        Report { item: val, children: Vec::new() }
     }
 }
 
 macro_rules! push {
     ($report:expr, $severity:ident, $($rest:tt)*) => {
-        $report.items.push(::report::ReportItem {
+        $report.push(::report::ReportItem {
             severity: ::report::Severity::$severity,
-            text: format!($($rest)*),
+            text: format!($($rest)*).into(),
         })
     }
 }

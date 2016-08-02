@@ -61,6 +61,9 @@ fn compare_macros(r: &mut Report, old: &[MacroDef], new: &[MacroDef]) {
 
 fn compare_mods(r: &mut Report, old: &Mod, new: &Mod) {
     use syntax::ast::ItemKind::*;
+    macro_rules! debug {
+        ($($rest:tt)*) => { push!(r, Debug, $($rest)*) }
+    }
 
     let mut child_mods = Vec::new();
 
@@ -124,6 +127,32 @@ fn compare_mods(r: &mut Report, old: &Mod, new: &Mod) {
                     false
                 }
             }),
+            // Functions
+            Fn(ref decl, unsafety, constness, abi, ref generics, _) => {
+                if decl.variadic {
+                    push!(r, Error, "non-foreign fn {} is variadic", item.ident);
+                }
+                debug!("decl = {:?}", decl);
+                debug!("generics = {:?}", generics);
+                debug!("{:?} {:?} {:?}", unsafety, constness, abi);
+                find_item!(fn new_item; {
+                    if let Fn(ref new_decl, new_unsafety, new_constness, new_abi, ref new_generics, _) = new_item.node {
+                        if unsafety != new_unsafety {
+                            changed!(r, Breaking, "fn {}'s unsafety", (unsafety => new_unsafety), item.ident);
+                        }
+                        if constness == Constness::Const && new_constness == Constness::NotConst {
+                            push!(r, Breaking, "fn {} was made non-const", item.ident);
+                        }
+                        if abi != new_abi {
+                            changed!(r, Breaking, "fn {}'s abi", (abi => new_abi), item.ident);
+                        }
+                        // TODO: actual signature comparison
+                        true
+                    } else {
+                        false
+                    }
+                })
+            }
             // Unhandled types
             _ => push!(r, Note, "Item \"{}\" has unhandled kind: {}", item.ident, item.node.descriptive_variant()),
         }
@@ -133,7 +162,7 @@ fn compare_mods(r: &mut Report, old: &Mod, new: &Mod) {
 
     // Recurse to child modules
     for (name, old_child, new_child) in child_mods {
-        compare_mods(r, old_child, new_child);
+        compare_mods(r.nest(ReportItem::new(Severity::Note, format!("mod {}", name))), old_child, new_child);
     }
 }
 

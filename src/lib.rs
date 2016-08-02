@@ -23,16 +23,10 @@ pub fn create_report(old: &Path, new: &Path) -> report::Report {
 
     let mut report = report::Report::new();
     if old_crate.is_none() {
-        report.items.push(report::ReportItem {
-            severity: report::Severity::Error,
-            text: format!("Failed to read crate at {}", old.display())
-        })
+        push!(report, Error, "Failed to read crate at {}", old.display());
     }
     if new_crate.is_none() {
-        report.items.push(report::ReportItem {
-            severity: report::Severity::Error,
-            text: format!("Failed to read crate at {}", new.display())
-        })
+        push!(report, Error, "Failed to read crate at {}", new.display());
     }
     if let (Some(old), Some(new)) = (old_crate, new_crate) {
         compare_crates(&mut report, &old, &new);

@@ -1,11 +1,10 @@
 //! Old comments.
 pub const FOO: i32 = 5;
 
-#[cfg(unix)]
-pub const PLATFORM: u8 = 0;
-#[cfg(windows)]
-pub const PLATFORM: u16 = 0;
+pub fn foo<T>(_: T) -> i32 {
+    FOO
+}
 
 pub mod wumbo {
-    pub const W: () = ();
+    pub const W: i32 = 0;
 }
