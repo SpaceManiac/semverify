@@ -8,8 +8,8 @@ fn main() {
 }
 
 fn print_report(indent: usize, report: &Report) {
-    print_item(indent, &report.item);
     for child in &report.children {
+        print_item(indent, &child.item);
         print_report(indent + 2, &child);
     }
 }

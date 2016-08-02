@@ -51,6 +51,10 @@ impl Report {
         self.children.push(child.into());
         self.children.last_mut().unwrap()
     }
+
+    pub fn highest_severity(&self) -> Severity {
+        self.children.iter().map(Report::highest_severity).max().unwrap_or(self.item.severity)
+    }
 }
 
 impl From<ReportItem> for Report {

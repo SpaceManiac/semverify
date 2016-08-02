@@ -1,6 +1,5 @@
-use std::collections::{BTreeSet, BTreeMap};
+use std::collections::BTreeSet;
 use syntax::ast::*;
-use syntax::parse::token::InternedString;
 use report::*;
 
 /// Check that targets covered by `old` are a subset of those by `new`.
