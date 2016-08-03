@@ -23,14 +23,17 @@ pub enum Severity {
     Error,
 }
 
-/// Laziness level.
+/// Strictness level of a report item.
+///
+/// `Lazy` report items are only included in the final report if they have
+/// `Strict` children.
 #[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Debug)]
 pub enum Strictness {
-    /// Delete if no recursive child is Strict.
+    /// Deleted if no recursive child is Strict.
     Lazy,
-    /// Do not delete, but do not inhibit deletion.
+    /// Deleted if parent is deleted.
     Inherit,
-    /// Never delete.
+    /// Never deleted.
     Strict,
 }
 
@@ -50,7 +53,7 @@ pub struct Report {
 }
 
 impl Report {
-    /// Construct a new, empty `Report`.
+    /// Construct a new, empty report.
     pub fn new() -> Report {
         Report::from(ReportItem {
             strict: Strictness::Strict,
@@ -59,6 +62,7 @@ impl Report {
         })
     }
 
+    /// Calculate the highest severity item contained in this report.
     pub fn highest_severity(&self) -> Severity {
         self.children.iter().map(Report::highest_severity).max().unwrap_or(self.item.severity)
     }
@@ -72,6 +76,7 @@ impl Report {
             self.children.iter().all(|c| c.item.strict < Strictness::Strict)
     }
 
+    /// Insert a new item into this report, returning it.
     pub fn push(&mut self, child: ReportItem) -> &mut Report {
         self.children.push(child.into());
         self.children.last_mut().unwrap()
