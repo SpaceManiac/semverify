@@ -113,7 +113,7 @@ fn compare_mods(r: &mut Report, old: &Mod, new: &Mod) {
             // Breaking: "implementing any non-fundamental trait."
 
             // TODO: Inherent implementations
-            // Brekaing: "adding any inherent items."
+            // Breaking: "adding any inherent items."
 
             // TODO: Type aliases
             // See: Signatures in type definitions
