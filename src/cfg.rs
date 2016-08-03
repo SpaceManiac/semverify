@@ -1,17 +1,228 @@
 use std::collections::BTreeSet;
+use std::fmt;
 use syntax::ast::*;
 use report::*;
 
-/// Check that targets covered by `old` are a subset of those by `new`.
-pub fn subset(r: &mut Report, old: &[Attribute], new: &[Attribute]) -> bool {
-    Config::new(r, old).subset(&Config::new(r, new))
+/// A `#[cfg]` attribute represented as a boolean expression tree.
+#[derive(PartialEq, Eq)]
+pub enum Config {
+    // combinators
+    Not(Box<Config>),
+    All(Vec<Config>),
+    Any(Vec<Config>),
+    // atoms
+    TargetProperty(String, String),
+    Feature(String),
+    Flag(String),
+    // internal use only
+    True,
+    False,
+}
+
+impl Config {
+    /// Extract a Config from the given list of attributes.
+    pub fn new(r: &mut Report, attrs: &[Attribute]) -> Config {
+        cfg_from_attr_list(r, attrs).unwrap_or(Config::True)
+    }
+
+    /// Determine if this Config is a subset of another.
+    ///
+    /// Returns `true` if in all cases where this Config applies, so too
+    /// does `other`.
+    pub fn subset(&self, other: &Config) -> bool {
+        if other.is_universal() {
+            true
+        // no short-circuit if self.is_universal(): other may be like Any([True, False])
+        } else {
+            !any(self, other, |vars| self.evaluate(vars) && !other.evaluate(vars))
+        }
+    }
+
+    /// Determine if this Config overlaps with another.
+    ///
+    /// Returns `true` if in any case where this Config applies, so too
+    /// does `other`.
+    pub fn intersects(&self, other: &Config) -> bool {
+        if other.is_universal() || self.is_universal() {
+            true
+        } else {
+            any(self, other, |vars| self.evaluate(vars) && other.evaluate(vars))
+        }
+    }
+
+    /// Determine if this Config is exactly equivalent to another.
+    pub fn equivalent(&self, other: &Config) -> bool {
+        if self.is_universal() && other.is_universal() {
+            true
+        } else {
+            !any(self, other, |vars| self.evaluate(vars) ^ other.evaluate(vars))
+        }
+    }
+
+    /// Make an entry in the report for this Config if needed.
+    ///
+    /// An entry is only made if this config is conditional with respect to
+    /// the provided parent. `Config::True` can be used if needed.
+    pub fn report<'a>(&self, r: &'a mut Report, parent: &Config, prefix: &str) -> &'a mut Report {
+        if parent.subset(self) {
+            r // also applies when self.is_universal()
+        } else {
+            push!(r, Note, "{}#[cfg({:?})]", prefix, self)
+        }
+    }
+
+    /// Compute the union of this config and another.
+    pub fn union(&mut self, mut other: Config) {
+        if let Config::Any(ref mut inner) = *self {
+            if let Config::Any(inner_2) = other {
+                inner.extend(inner_2);
+            } else {
+                inner.push(other);
+            }
+            return
+        }
+        ::std::mem::swap(self, &mut other);
+        if let Config::Any(ref mut inner) = *self {
+            inner.push(other);
+            return;
+        }
+        *self = Config::Any(vec![
+            ::std::mem::replace(self, Config::Any(Vec::new())), // dummy value
+            other
+        ]);
+    }
+
+    /// Simplify this config, removing certain kinds of redundancies.
+    pub fn simplify(&mut self) {
+        let new_value;
+        match *self {
+            Config::Not(ref mut inner) => {
+                inner.simplify();
+                if **inner == Config::True {
+                    new_value = Config::False;
+                } else if **inner == Config::False {
+                    new_value = Config::True;
+                } else {
+                    return
+                }
+            }
+            Config::All(ref mut inner) => {
+                for each in inner.iter_mut() {
+                    each.simplify();
+                }
+                inner.retain(|i| *i != Config::True);
+                if inner.len() == 0 {
+                    new_value = Config::True;
+                } else if inner.len() == 1 {
+                    new_value = inner.remove(0);
+                } else {
+                    return
+                }
+            }
+            Config::Any(ref mut inner) => {
+                for each in inner.iter_mut() {
+                    each.simplify();
+                }
+                inner.retain(|i| *i != Config::False);
+                if inner.len() == 0 {
+                    new_value = Config::False;
+                } else if inner.len() == 1 {
+                    new_value = inner.remove(0);
+                } else {
+                    return
+                }
+            }
+            _ => return,
+        }
+        *self = new_value;
+    }
+
+    #[inline]
+    fn is_universal(&self) -> bool {
+        *self == Config::True
+    }
+
+    fn find_free_vars<'a>(&'a self, out: &mut BTreeSet<FreeVar<'a>>) {
+        match *self {
+            Config::Not(ref inner) => { inner.find_free_vars(out); }
+            Config::All(ref inner) | Config::Any(ref inner) => {
+                for i in inner { i.find_free_vars(out) }
+            }
+            Config::TargetProperty(ref key, ref val) => {
+                out.insert(FreeVar::TargetProperty(key, val));
+            }
+            Config::Feature(ref name) => { out.insert(FreeVar::Feature(name)); }
+            Config::Flag(ref name) => { out.insert(FreeVar::Flag(name)); }
+            Config::True | Config::False => {},
+        }
+    }
+
+    fn evaluate(&self, vars: &BTreeSet<&FreeVar>) -> bool {
+        match *self {
+            Config::Not(ref inner) => !inner.evaluate(vars),
+            Config::All(ref inner) => inner.iter().all(|i| i.evaluate(vars)),
+            Config::Any(ref inner) => inner.iter().any(|i| i.evaluate(vars)),
+            Config::TargetProperty(ref key, ref val) => vars.contains(&&FreeVar::TargetProperty(key, val)),
+            Config::Feature(ref name) => vars.contains(&&FreeVar::Feature(name)),
+            Config::Flag(ref name) => vars.contains(&&FreeVar::Flag(name)),
+            Config::True => true,
+            Config::False => false,
+        }
+    }
+}
+
+/// Show this `Config` in a human-readable format, wrapping in #[cfg] if needed.
+impl fmt::Display for Config {
+    fn fmt(&self, fmt: &mut fmt::Formatter) -> fmt::Result {
+        match *self {
+            Config::True => fmt.write_str("always available"),
+            Config::False => fmt.write_str("never available"),
+            _ => write!(fmt, "#[cfg({:?})]", self),
+        }
+    }
+}
+
+impl fmt::Debug for Config {
+    fn fmt(&self, fmt: &mut fmt::Formatter) -> fmt::Result {
+        match *self {
+            Config::Not(ref inner) => write!(fmt, "not({:?})", inner),
+            Config::All(ref inner) => fmt_list(fmt, inner, "all("),
+            Config::Any(ref inner) => fmt_list(fmt, inner, "any("),
+            Config::TargetProperty(ref key, ref val) => write!(fmt, "{}={:?}", key, val),
+            Config::Feature(ref name) => write!(fmt, "feature={:?}", name),
+            Config::Flag(ref name) => write!(fmt, "{}", name),
+            Config::True => fmt.write_str("__true"),
+            Config::False => fmt.write_str("__false"),
+        }
+    }
+}
+
+fn fmt_list(fmt: &mut fmt::Formatter, inner: &[Config], start: &str) -> fmt::Result {
+    use std::fmt::Write;
+
+    try!(fmt.write_str(start));
+    let mut first = true;
+    for each in inner {
+        if first {
+            first = false;
+        } else {
+            try!(fmt.write_str(", "));
+        }
+        try!(write!(fmt, "{:?}", each));
+    }
+    fmt.write_char(')')
 }
 
 /// None = universal
 fn cfg_from_attr_list(r: &mut Report, attrs: &[Attribute]) -> Option<Config> {
     let all: Vec<Config> = attrs.iter().flat_map(|attr| match attr.node.value.node {
         MetaItemKind::List(ref string, ref items) if &**string == "cfg" && items.len() == 1 => {
-            Some(cfg_from_meta(r, &items[0].node))
+            if items.len() == 1 {
+                Some(cfg_from_meta(r, &items[0].node))
+            } else {
+                push!(r, Error, "Non-unary #[cfg]: {:?}", items);
+                None
+            }
         }
         _ => None
     }).collect();
@@ -62,152 +273,6 @@ fn cfg_from_meta(r: &mut Report, attr: &MetaItemKind) -> Config {
                     Config::Flag(string.to_string())
                 }
             }
-        }
-    }
-}
-
-#[derive(Debug, PartialEq, Eq)]
-pub enum Config {
-    // combinators
-    Not(Box<Config>),
-    All(Vec<Config>),
-    Any(Vec<Config>),
-    // atoms
-    TargetProperty(String, String),
-    Feature(String),
-    Flag(String),
-    // internal use only
-    True,
-    False,
-}
-
-impl Config {
-    /// Extract a Config from the given list of attributes.
-    pub fn new(r: &mut Report, attrs: &[Attribute]) -> Config {
-        cfg_from_attr_list(r, attrs).unwrap_or(Config::True)
-    }
-
-    /// Simplify this config, removing certain kinds of redundancies.
-    pub fn simplify(&mut self) {
-        let new_value;
-        match *self {
-            Config::Not(ref mut inner) => return inner.simplify(),
-            Config::All(ref mut inner) => {
-                for each in inner.iter_mut() {
-                    each.simplify();
-                }
-                inner.retain(|i| *i != Config::True);
-                if inner.len() == 0 {
-                    new_value = Config::True;
-                } else if inner.len() == 1 {
-                    new_value = inner.remove(0);
-                } else {
-                    return
-                }
-            }
-            Config::Any(ref mut inner) => {
-                for each in inner.iter_mut() {
-                    each.simplify();
-                }
-                inner.retain(|i| *i != Config::False);
-                if inner.len() == 0 {
-                    new_value = Config::False;
-                } else if inner.len() == 1 {
-                    new_value = inner.remove(0);
-                } else {
-                    return
-                }
-            }
-            _ => return,
-        }
-        *self = new_value;
-    }
-
-    /// Compute the union of this config and another.
-    pub fn union(&mut self, mut other: Config) {
-        if let Config::Any(ref mut inner) = *self {
-            if let Config::Any(inner_2) = other {
-                inner.extend(inner_2);
-            } else {
-                inner.push(other);
-            }
-            return
-        }
-        ::std::mem::swap(self, &mut other);
-        if let Config::Any(ref mut inner) = *self {
-            inner.push(other);
-            return;
-        }
-        *self = Config::Any(vec![
-            ::std::mem::replace(self, Config::Any(Vec::new())), // dummy value
-            other
-        ]);
-    }
-
-    /// Determine if this Config is a subset of another.
-    ///
-    /// Returns `true` if in all cases where this Config applies, so too
-    /// does `other`.
-    pub fn subset(&self, other: &Config) -> bool {
-        if other.is_universal() {
-            true
-        // no short-circuit if self.is_universal(): other may be like Any([True, False])
-        } else {
-            !any(self, other, |vars| self.evaluate(vars) && !other.evaluate(vars))
-        }
-    }
-
-    /// Determine if this Config overlaps with another.
-    ///
-    /// Returns `true` if in any case where this Config applies, so too
-    /// does `other`.
-    pub fn intersects(&self, other: &Config) -> bool {
-        if other.is_universal() || self.is_universal() {
-            true
-        } else {
-            any(self, other, |vars| self.evaluate(vars) && other.evaluate(vars))
-        }
-    }
-
-    /// Determine if this Config is exactly equivalent to another.
-    pub fn equivalent(&self, other: &Config) -> bool {
-        if self.is_universal() && other.is_universal() {
-            true
-        } else {
-            !any(self, other, |vars| self.evaluate(vars) ^ other.evaluate(vars))
-        }
-    }
-
-    #[inline]
-    fn is_universal(&self) -> bool {
-        *self == Config::True
-    }
-
-    fn find_free_vars<'a>(&'a self, out: &mut BTreeSet<FreeVar<'a>>) {
-        match *self {
-            Config::Not(ref inner) => { inner.find_free_vars(out); }
-            Config::All(ref inner) | Config::Any(ref inner) => {
-                for i in inner { i.find_free_vars(out) }
-            }
-            Config::TargetProperty(ref key, ref val) => {
-                out.insert(FreeVar::TargetProperty(key, val));
-            }
-            Config::Feature(ref name) => { out.insert(FreeVar::Feature(name)); }
-            Config::Flag(ref name) => { out.insert(FreeVar::Flag(name)); }
-            Config::True | Config::False => {},
-        }
-    }
-
-    fn evaluate(&self, vars: &BTreeSet<&FreeVar>) -> bool {
-        match *self {
-            Config::Not(ref inner) => !inner.evaluate(vars),
-            Config::All(ref inner) => inner.iter().all(|i| i.evaluate(vars)),
-            Config::Any(ref inner) => inner.iter().any(|i| i.evaluate(vars)),
-            Config::TargetProperty(ref key, ref val) => vars.contains(&&FreeVar::TargetProperty(key, val)),
-            Config::Feature(ref name) => vars.contains(&&FreeVar::Feature(name)),
-            Config::Flag(ref name) => vars.contains(&&FreeVar::Flag(name)),
-            Config::True => true,
-            Config::False => false,
         }
     }
 }
@@ -265,7 +330,7 @@ fn any<F: Fn(&BTreeSet<&FreeVar>) -> bool>(one: &Config, other: &Config, f: F) -
     false
 }
 
-#[derive(PartialEq, Eq, PartialOrd, Ord, Debug)]
+#[derive(PartialEq, Eq, PartialOrd, Ord)]
 enum FreeVar<'a> {
     TargetProperty(&'a str, &'a str),
     Feature(&'a str),

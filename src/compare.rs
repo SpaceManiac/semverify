@@ -12,30 +12,33 @@
 // The individual subheadings in the RFC are marked Minor or Major, with a note for
 // Minor changes which are Breaking. These subheadings are explicitly called out
 // adjacent to the code which checks for them, with additional notes if needed.
+// The RFC is not exhaustive, and serves primarily as a guide for the severity of
+// changes which are not obviously Major.
 //
 // Note that behavioral changes that are not reflected in public signatures are
 // not covered by the RFC, and probably cannot be checked by a tool like this.
 // Instead, they should be caught using a comprehensive test suite.
 
 use syntax::ast::*;
+use syntax::abi::Abi;
 
 use report::*;
-use cfg;
+use cfg::Config;
 
 macro_rules! find_item_l {
     ($r:expr; $kind:tt $var:ident: $orig:expr; in $iter:expr; $b:block) => {{
         let name = $orig.ident.name;
         let (mut any_found, mut pub_found, mut kind_found) = (false, false, false);
 
-        let our_config = cfg::Config::new($r, &$orig.attrs);
-        let mut their_config = cfg::Config::False;
+        let our_config = Config::new($r, &$orig.attrs);
+        let mut their_config = Config::False;
 
         for $var in $iter {
             if $var.ident.name == name {
                 any_found = true;
                 if is_public($var) {
                     pub_found = true;
-                    let current_config = cfg::Config::new($r, &$var.attrs);
+                    let current_config = Config::new($r, &$var.attrs);
                     if our_config.intersects(&current_config) && $b {
                         their_config.union(current_config);
                         kind_found = true;
@@ -52,7 +55,7 @@ macro_rules! find_item_l {
             push!($r, Major, "{0} {1} is no longer a {0}", kind, name);
         } else if !our_config.subset(&their_config) {
             their_config.simplify(); // TODO: maybe move this up sometime
-            push!($r, Major, "{} {} has been narrowed:\n  Was: {:?}\n  Now: {:?}", kind, name, our_config, their_config);
+            push!($r, Major, "{} {} has been narrowed:\n  Was: {}\n  Now: {}", kind, name, our_config, their_config);
         }
     }}
 }
@@ -63,8 +66,12 @@ fn todo(r: &mut Report, msg: &str) {
 
 /// Generate a report on changes described in the "Crates" section.
 pub fn compare_crates(r: &mut Report, old: &Crate, new: &Crate) {
-    if !cfg::subset(r, &old.attrs, &new.attrs) {
-        push!(r, Major, "New crate reduces #[cfg] coverage");
+    let old_config = Config::new(r, &old.attrs);
+    let new_config = Config::new(r, &new.attrs);
+    if !old_config.subset(&new_config) {
+        push!(r, Major, "New crate reduces #[cfg] coverage\n  Was: {}\n  Now: {}", old_config, new_config);
+    } else if !new_config.subset(&old_config) {
+        push!(r, Minor, "New crate increases #[cfg] coverage\n  Was: {}\n  Now: {}", old_config, new_config);
     }
     // TODO: Major: "going from stable to nightly"
     // - if `new` has #[feature(...)] but `old` does not
@@ -186,21 +193,15 @@ fn compare_mods(r: &mut Report, old: &Mod, new: &Mod) {
                 if decl.variadic {
                     push!(r, Error, "non-foreign fn {} is variadic", item.ident);
                 }
-                debug!("decl = {:?}", decl);
-                debug!("generics = {:?}", generics);
-                debug!("{:?} {:?} {:?}", unsafety, constness, abi);
                 find_item!(fn new_item; {
                     if let Fn(ref new_decl, new_unsafety, new_constness, new_abi, ref new_generics, _) = new_item.node {
-                        if unsafety != new_unsafety {
-                            changed!(r, Major, "fn {}'s unsafety", (unsafety => new_unsafety), item.ident);
-                        }
+                        let r = push!(r, Note, "fn {}", item.ident.name);
                         if constness == Constness::Const && new_constness == Constness::NotConst {
-                            push!(r, Major, "fn {} was made non-const", item.ident);
+                            push!(r, Major, "const qualifier removed");
                         }
-                        if abi != new_abi {
-                            changed!(r, Major, "fn {}'s abi", (abi => new_abi), item.ident);
-                        }
-                        // TODO: actual signature comparison
+                        compare_functions(r,
+                            (decl, generics, unsafety, abi),
+                            (new_decl, new_generics, new_unsafety, new_abi));
                         true
                     } else {
                         false
@@ -208,7 +209,7 @@ fn compare_mods(r: &mut Report, old: &Mod, new: &Mod) {
                 })
             }
             // Unhandled types
-            _ => push!(r, Warning, "Unhandled: {} \"{}\"", item.node.descriptive_variant(), item.ident),
+            _ => { push!(r, Warning, "Unhandled: {} {}", item.node.descriptive_variant(), item.ident); },
         }
     }
 
@@ -225,15 +226,15 @@ fn compare_mods(r: &mut Report, old: &Mod, new: &Mod) {
             ($kind:tt $var:ident; $b:block) => {{
                 let name = item.ident.name;
                 let (mut any_found, mut pub_found, mut kind_found) = (false, false, false);
-                let our_config = cfg::Config::new(r, &item.attrs);
-                let mut their_config = cfg::Config::False;
+                let our_config = Config::new(r, &item.attrs);
+                let mut their_config = Config::False;
 
                 for $var in &old.items {
                     if $var.ident.name == name {
                         any_found = true;
                         if is_public($var) {
                             pub_found = true;
-                            let current_config = cfg::Config::new(r, &$var.attrs);
+                            let current_config = Config::new(r, &$var.attrs);
                             if our_config.intersects(&current_config) && $b {
                                 their_config.union(current_config);
                                 kind_found = true;
@@ -250,7 +251,7 @@ fn compare_mods(r: &mut Report, old: &Mod, new: &Mod) {
                     push!(r, Major, "{0} {1} is now a {0}", kind, name);
                 } else if !our_config.subset(&their_config) {
                     their_config.simplify(); // TODO: maybe move this down sometime
-                    push!(r, Minor, "{} {} has been widened:\n  Was: {:?}\n  Now: {:?}", kind, name, their_config, our_config);
+                    push!(r, Minor, "{} {} has been widened:\n  Was: {}\n  Now: {}", kind, name, their_config, our_config);
                 }
             }}
         }
@@ -271,15 +272,14 @@ fn compare_mods(r: &mut Report, old: &Mod, new: &Mod) {
             Fn(ref decl, unsafety, constness, abi, ref generics, _) => find_item!(fn old_item; {
                 match old_item.node { Fn(..) => true, _ => false }
             }),
-            // Unhandled types
-            _ => push!(r, Warning, "Unhandled: {} \"{}\"", item.node.descriptive_variant(), item.ident),
+            _ => {}
         }
     }
 
     // Recurse to child modules
     for (name, old_child, new_child) in child_mods {
         compare_mods(
-            r.nest(ReportItem::new(Severity::Note, format!("Inside mod {}", name))),
+            push!(r, Note, "mod {}", name),
             old_child, new_child);
     }
 }
@@ -292,6 +292,10 @@ fn compare_mods(r: &mut Report, old: &Mod, new: &Mod) {
 // - Minor: Foo(pub u8) to Foo<T = u8>(pub T)
 // - Major: Foo<T = u8>(pub T, pub u8) to Foo<T = u8>(pub T, pub T)
 // - Minor: Foo<T>(pub T, pub T) to Foo<T, U = T>(pub T, pub U)
+fn compare_type_generics(r: &mut Report, old: &Generics, new: &Generics) {
+    // TODO
+}
+
 fn types_equal(r: &mut Report, lhs: &Ty, rhs: &Ty) -> bool {
     // TODO: a more robust comparison not based on pretty-printing
     format!("{:?}", lhs) == format!("{:?}", rhs)
@@ -306,6 +310,18 @@ fn types_equal(r: &mut Report, lhs: &Ty, rhs: &Ty) -> bool {
 // - Major: if the generic has a bound not satisfied by the original type.
 // - Can in principle cause type inference failures, but left Minor.
 // - Minor: foo(_: &Trait) to foo<T: Trait + ?Sized>(t: &T)
+fn compare_functions(r: &mut Report,
+    (decl, generics, unsafety, abi): (&FnDecl, &Generics, Unsafety, Abi),
+    (new_decl, new_generics, new_unsafety, new_abi): (&FnDecl, &Generics, Unsafety, Abi))
+{
+    if unsafety != new_unsafety {
+        changed!(r, Major, "unsafety", (unsafety => new_unsafety));
+    }
+    if abi != new_abi {
+        changed!(r, Major, "abi", (abi => new_abi));
+    }
+    // TODO
+}
 
 // TODO: Lints
 // Minor: "introducing new lint warnings/errors"

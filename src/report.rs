@@ -70,7 +70,7 @@ impl From<ReportItem> for Report {
 
 macro_rules! push {
     ($report:expr, $severity:ident, $($rest:tt)*) => {
-        $report.push(::report::ReportItem {
+        $report.nest(::report::ReportItem {
             severity: ::report::Severity::$severity,
             text: format!($($rest)*).into(),
         })
