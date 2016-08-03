@@ -25,41 +25,6 @@ use syntax::abi::Abi;
 use report::*;
 use cfg::Config;
 
-macro_rules! find_item_l {
-    ($r:expr; $kind:tt $var:ident: $orig:expr; in $iter:expr; $b:block) => {{
-        let name = $orig.ident.name;
-        let (mut any_found, mut pub_found, mut kind_found) = (false, false, false);
-
-        let our_config = Config::new($r, &$orig.attrs);
-        let mut their_config = Config::False;
-
-        for $var in $iter {
-            if $var.ident.name == name {
-                any_found = true;
-                if is_public($var) {
-                    pub_found = true;
-                    let current_config = Config::new($r, &$var.attrs);
-                    if our_config.intersects(&current_config) && $b {
-                        their_config.union(current_config);
-                        kind_found = true;
-                    }
-                }
-            }
-        }
-        let kind = stringify!($kind);
-        if !any_found {
-            push!($r, Major, "{} {} was removed", kind, name);
-        } else if !pub_found {
-            push!($r, Major, "{} {} was made private", kind, name);
-        } else if !kind_found {
-            push!($r, Major, "{0} {1} is no longer a {0}", kind, name);
-        } else if !our_config.subset(&their_config) {
-            their_config.simplify(); // TODO: maybe move this up sometime
-            push!($r, Major, "{} {} has been narrowed:\n  Was: {}\n  Now: {}", kind, name, our_config, their_config);
-        }
-    }}
-}
-
 fn todo(r: &mut Report, msg: &str) {
     push!(r, Debug, "TODO: {}", msg);
 }
@@ -102,20 +67,30 @@ fn compare_mods(r: &mut Report, old: &Mod, new: &Mod) {
         if !is_public(item) { continue }
 
         macro_rules! find_item {
-            ($kind:tt $var:ident; $b:block) => {
-                find_item_l!(r; $kind $var: item; in &new.items; $b)
-            }
+            ($kind_name:expr; $closure:expr) => {{
+                let kind = $kind_name;
+                let r = push!(r, Note, "{} {}", kind, item.ident.name);
+                let result = search_items(r, item, new.items.iter().map(|x| &**x), $closure);
+                if !result.found_name {
+                    push!(r, Major, "removed");
+                } else if !result.found_pub {
+                    push!(r, Major, "made private");
+                } else if !result.found_kind {
+                    push!(r, Major, "no longer a {}", kind);
+                } else if !result.item_cfg.subset(&result.found_cfgs) {
+                    push!(r, Major, "availability narrowed:\n  Was: {}\n  Now: {}", result.found_cfgs, result.item_cfg);
+                }
+            }}
         }
 
         match item.node {
             // Child module: push to list for later consumption (improves tree structure)
-            Mod(ref module) => find_item!(mod new_item; {
-                if let Mod(ref new_module) = new_item.node {
-                    child_mods.push((item.ident.name, module, new_module));
+            Mod(ref module) => find_item!("mod"; |r, new| match new.node {
+                Mod(ref new_module) => {
+                    child_mods.push((item, module, new, new_module));
                     true
-                } else {
-                    false
                 }
+                _ => false
             }),
 
             // TODO: Structs
@@ -149,13 +124,14 @@ fn compare_mods(r: &mut Report, old: &Mod, new: &Mod) {
             // See: Signatures in type definitions
 
             // Consts and statics
-            Const(ref ty, _) => find_item!(const new_item; {
-                if let Const(ref new_ty, _) = new_item.node {
+            Const(ref ty, _) => find_item!("const"; |r, new| match new.node {
+                Const(ref new_ty, _) => {
                     if !types_equal(r, ty, new_ty) {
                         changed!(r, Major, "const {}'s type", (ty => new_ty), item.ident);
                     }
                     true
-                } else if let Static(ref new_ty, mutability, _) = new_item.node {
+                }
+                Static(ref new_ty, mutability, _) => {
                     if mutability != Mutability::Immutable {
                         push!(r, Major, "const {} replaced by static mut", item.ident);
                     } else {
@@ -165,18 +141,18 @@ fn compare_mods(r: &mut Report, old: &Mod, new: &Mod) {
                         changed!(r, Major, "const {}'s type", (ty => new_ty), item.ident);
                     }
                     true
-                } else {
-                    false
                 }
+                _ => false
             }),
-            Static(ref ty, mutability, _) => find_item!(static new_item; {
-                if let Const(ref new_ty, _) = new_item.node {
+            Static(ref ty, mutability, _) => find_item!("static"; |r, new| match new.node {
+                Const(ref new_ty, _) => {
                     push!(r, Major, "static {} replaced by const", item.ident);
                     if !types_equal(r, ty, new_ty) {
                         changed!(r, Major, "static {}'s type", (ty => new_ty), item.ident);
                     }
                     true
-                } else if let Static(ref new_ty, new_mutability, _) = new_item.node {
+                }
+                Static(ref new_ty, new_mutability, _) => {
                     if !types_equal(r, ty, new_ty) {
                         changed!(r, Major, "static {}'s type", (ty => new_ty), item.ident);
                     }
@@ -184,28 +160,25 @@ fn compare_mods(r: &mut Report, old: &Mod, new: &Mod) {
                         changed!(r, Major, "static {}'s mutability", (mutability => new_mutability), item.ident);
                     }
                     true
-                } else {
-                    false
                 }
+                _ => false
             }),
             // Functions
             Fn(ref decl, unsafety, constness, abi, ref generics, _) => {
                 if decl.variadic {
                     push!(r, Error, "non-foreign fn {} is variadic", item.ident);
                 }
-                find_item!(fn new_item; {
-                    if let Fn(ref new_decl, new_unsafety, new_constness, new_abi, ref new_generics, _) = new_item.node {
-                        let r = push!(r, Note, "fn {}", item.ident.name);
-                        if constness == Constness::Const && new_constness == Constness::NotConst {
-                            push!(r, Major, "const qualifier removed");
-                        }
-                        compare_functions(r,
-                            (decl, generics, unsafety, abi),
-                            (new_decl, new_generics, new_unsafety, new_abi));
-                        true
-                    } else {
-                        false
+                find_item!("fn"; |r, new| if let Fn(ref new_decl, new_unsafety, new_constness, new_abi, ref new_generics, _) = new.node {
+                    let r = push!(r, Note, "fn {}", item.ident.name);
+                    if constness == Constness::Const && new_constness == Constness::NotConst {
+                        push!(r, Major, "const qualifier removed");
                     }
+                    compare_functions(r,
+                        (decl, generics, unsafety, abi),
+                        (new_decl, new_generics, new_unsafety, new_abi));
+                    true
+                } else {
+                    false
                 })
             }
             // Unhandled types
@@ -223,64 +196,49 @@ fn compare_mods(r: &mut Report, old: &Mod, new: &Mod) {
         if !is_public(item) { continue }
 
         macro_rules! find_item {
-            ($kind:tt $var:ident; $b:block) => {{
-                let name = item.ident.name;
-                let (mut any_found, mut pub_found, mut kind_found) = (false, false, false);
-                let our_config = Config::new(r, &item.attrs);
-                let mut their_config = Config::False;
-
-                for $var in &old.items {
-                    if $var.ident.name == name {
-                        any_found = true;
-                        if is_public($var) {
-                            pub_found = true;
-                            let current_config = Config::new(r, &$var.attrs);
-                            if our_config.intersects(&current_config) && $b {
-                                their_config.union(current_config);
-                                kind_found = true;
-                            }
-                        }
-                    }
-                }
-                let kind = stringify!($kind);
-                if !any_found {
-                    push!(r, Major, "{} {} was added", kind, name);
-                } else if !pub_found {
-                    push!(r, Major, "{} {} was made public", kind, name);
-                } else if !kind_found {
-                    push!(r, Major, "{0} {1} is now a {0}", kind, name);
-                } else if !our_config.subset(&their_config) {
-                    their_config.simplify(); // TODO: maybe move this down sometime
-                    push!(r, Minor, "{} {} has been widened:\n  Was: {}\n  Now: {}", kind, name, their_config, our_config);
+            ($kind_name:expr; $closure:expr) => {{
+                let kind = $kind_name;
+                let r = push!(r, lazy Note, "{} {}", kind, item.ident.name);
+                let result = search_items(r, item, old.items.iter().map(|x| &**x), $closure);
+                if !result.found_name {
+                    push!(r, Minor, "added");
+                } else if !result.found_pub {
+                    push!(r, Minor, "made public");
+                } else if !result.found_kind {
+                    push!(r, Major, "now a {}", kind);
+                } else if !result.item_cfg.subset(&result.found_cfgs) {
+                    push!(r, Minor, "availability widened:\n  Was: {}\n  Now: {}", result.found_cfgs, result.item_cfg);
                 }
             }}
         }
 
         match item.node {
             // Child modules
-            Mod(ref module) => find_item!(mod old_item; {
-                match old_item.node { Mod(_) => true, _ => false }
+            Mod(ref module) => find_item!("mod"; |_, old| match old.node {
+                Mod(_) => true, _ => false,
             }),
             // Consts and statics
-            Const(ref ty, _) => find_item!(const old_item; {
-                match old_item.node { Const(..) | Static(..) => true, _ => false }
+            Const(ref ty, _) => find_item!("const"; |_, old| {
+                match old.node { Const(..) | Static(..) => true, _ => false }
             }),
-            Static(ref ty, mutability, _) => find_item!(static old_item; {
-                match old_item.node { Const(..) | Static(..) => true, _ => false }
+            Static(ref ty, mutability, _) => find_item!("static"; |_, old| {
+                match old.node { Const(..) | Static(..) => true, _ => false }
             }),
             // Functions
-            Fn(ref decl, unsafety, constness, abi, ref generics, _) => find_item!(fn old_item; {
-                match old_item.node { Fn(..) => true, _ => false }
+            Fn(ref decl, unsafety, constness, abi, ref generics, _) => find_item!("fn"; |_, old| {
+                match old.node { Fn(..) => true, _ => false }
             }),
             _ => {}
         }
     }
 
     // Recurse to child modules
-    for (name, old_child, new_child) in child_mods {
-        compare_mods(
-            push!(r, Note, "mod {}", name),
-            old_child, new_child);
+    for (item, module, new_item, new_module) in child_mods {
+        let r = push!(r, Note, "mod {}", item.ident.name);
+        let old_config = Config::new(r, &item.attrs);
+        old_config.report(r, &Config::True, "");
+        let r = Config::new(r, &new_item.attrs).report(r, &old_config, "Comparing with ");
+        compare_mods(r, module, new_module);
     }
 }
 
@@ -345,6 +303,54 @@ fn use_defines_name(r: &mut Report, vp: &ViewPath, name: Name) -> bool {
             }
         })
     }
+}
+
+struct SearchResult {
+    /// The #[cfg] flags on the input item
+    item_cfg: Config,
+    /// The union of #[cfg] flags on matching items
+    found_cfgs: Config,
+    /// Found an item with a matching name
+    found_name: bool,
+    /// ... that is also public
+    found_pub: bool,
+    /// ... that was also a matching kind
+    found_kind: bool,
+}
+
+fn search_items<'a, I, F>(r: &mut Report, orig: &Item, iter: I, mut f: F) -> SearchResult where
+    F: FnMut(&mut Report, &'a Item) -> bool,
+    I: IntoIterator<Item=&'a Item>,
+{
+    let mut result = SearchResult {
+        item_cfg: Config::new(r, &orig.attrs),
+        found_cfgs: Config::False,
+        found_name: false,
+        found_pub: false,
+        found_kind: false,
+    };
+    result.item_cfg.report(r, &Config::True, "");
+
+    for item in iter {
+        let item: &Item = &item;
+        if item.ident.name == orig.ident.name {
+            result.found_name = true;
+            if is_public(item) {
+                result.found_pub = true;
+                let local_cfg = Config::new(r, &item.attrs);
+                if result.item_cfg.intersects(&local_cfg) {
+                    let r = local_cfg.report(r, &result.item_cfg, "Comparing with ");
+                    if f(r, item) {
+                        result.found_cfgs.union(local_cfg);
+                        result.found_kind = true;
+                    }
+                }
+            }
+        }
+    }
+
+    result.found_cfgs.simplify();
+    result
 }
 
 fn is_public(item: &Item) -> bool {

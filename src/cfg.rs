@@ -67,7 +67,12 @@ impl Config {
         if parent.subset(self) {
             r // also applies when self.is_universal()
         } else {
-            push!(r, Note, "{}#[cfg({:?})]", prefix, self)
+            let lazy = r.item.lazy; // inherit the parent's laziness
+            r.push(ReportItem {
+                lazy: lazy,
+                severity: Severity::Note,
+                text: format!("{}#[cfg({:?})]", prefix, self).into(),
+            })
         }
     }
 
