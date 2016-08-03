@@ -67,12 +67,7 @@ impl Config {
         if parent.subset(self) {
             r // also applies when self.is_universal()
         } else {
-            let lazy = r.item.lazy; // inherit the parent's laziness
-            r.push(ReportItem {
-                lazy: lazy,
-                severity: Severity::Note,
-                text: format!("{}#[cfg({:?})]", prefix, self).into(),
-            })
+            push!(r, Inherit Note, "{}#[cfg({:?})]", prefix, self)
         }
     }
 
@@ -241,6 +236,9 @@ fn cfg_from_meta(r: &mut Report, attr: &MetaItemKind) -> Config {
     use syntax::ast::MetaItemKind::*;
     match *attr {
         Word(ref string) => match &**string {
+            // NOTE: The default target_family values are ONLY "unix" and
+            // "windows". Other values are not handled here, but writing out
+            // `#[cfg(target_family="nonstandard_value")]` will work fine.
             "unix" | "windows" =>
                 Config::TargetProperty("target_family".into(), string.to_string()),
             _ => Config::Flag(string.to_string()),
@@ -260,18 +258,22 @@ fn cfg_from_meta(r: &mut Report, attr: &MetaItemKind) -> Config {
             }
         },
         NameValue(ref string, ref lit) => {
-            let string_lit = if let LitKind::Str(ref string, _) = lit.node {
-                string.to_string()
+            let string_lit = if let LitKind::Str(ref str_lit, _) = lit.node {
+                str_lit.to_string()
             } else {
-                push!(r, Error, "Non-string #[cfg(feature)]: {:?}", lit);
-                return Config::Flag("feature".into())
+                push!(r, Error, "Non-string #[cfg]: {} = {:?}", string, lit);
+                return Config::Flag(string.to_string())
             };
             match &**string {
                 "feature" => Config::Feature(string_lit),
                 "target_arch" | "target_os" | "target_family" |
                 "target_env" | "target_endian" | "target_pointer_width" |
-                "target_has_atomic" | "target_vendor" => {
+                "target_vendor" => {
                     Config::TargetProperty(string.to_string(), string_lit)
+                }
+                "target_has_atomic" => {
+                    // may be true for multiple values; treat like a flag
+                    Config::Flag(format!("target_has_atomic={:?}", string_lit))
                 }
                 _ => {
                     push!(r, Error, "Unknown #[cfg] key-value pair: {} = {:?}", string, lit.node);

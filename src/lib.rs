@@ -47,6 +47,7 @@ pub fn create_report(old: &Path, new: &Path) -> report::Report {
         compare_crates(&mut report, &old, &new);
     }
 
+    report.strip_lazy();
     report
 }
 

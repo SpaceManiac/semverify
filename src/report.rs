@@ -23,22 +23,23 @@ pub enum Severity {
     Error,
 }
 
+/// Laziness level.
+#[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Debug)]
+pub enum Strictness {
+    /// Delete if no recursive child is Strict.
+    Lazy,
+    /// Do not delete, but do not inhibit deletion.
+    Inherit,
+    /// Never delete.
+    Strict,
+}
+
 /// An informational entry in the report.
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub struct ReportItem {
-    pub lazy: bool,
+    pub strict: Strictness,
     pub severity: Severity,
     pub text: Cow<'static, str>,
-}
-
-impl ReportItem {
-    pub fn new<S: Into<Cow<'static, str>>>(severity: Severity, message: S) -> ReportItem {
-        ReportItem { lazy: false, severity: severity, text: message.into() }
-    }
-
-    pub fn lazy<S: Into<Cow<'static, str>>>(severity: Severity, message: S) -> ReportItem {
-        ReportItem { lazy: true, severity: severity, text: message.into() }
-    }
 }
 
 /// A node in the tree structure of the report.
@@ -49,18 +50,26 @@ pub struct Report {
 }
 
 impl Report {
+    /// Construct a new, empty `Report`.
     pub fn new() -> Report {
-        Report::from(ReportItem::new(Severity::Note, "Crate root"))
+        Report::from(ReportItem {
+            strict: Strictness::Strict,
+            severity: Severity::Note,
+            text: "Crate root".into(),
+        })
     }
 
     pub fn highest_severity(&self) -> Severity {
         self.children.iter().map(Report::highest_severity).max().unwrap_or(self.item.severity)
     }
 
-    /// Strip lazy entries. Returns `false` if all entries were lazy.
+    /// Strip lazy entries. Returns whether this entry might be deleted.
     pub fn strip_lazy(&mut self) -> bool {
-        retain_mut(&mut self.children, Report::strip_lazy);
-        !self.item.lazy || !self.children.is_empty()
+        // delete all Lazy children
+        delete_if(&mut self.children, Report::strip_lazy);
+        // delete us if we are Lazy and no children are Strict
+        self.item.strict == Strictness::Lazy &&
+            self.children.iter().all(|c| c.item.strict < Strictness::Strict)
     }
 
     pub fn push(&mut self, child: ReportItem) -> &mut Report {
@@ -78,20 +87,20 @@ impl From<ReportItem> for Report {
 macro_rules! push {
     (@_format $string:expr) => ($string.into());
     (@_format $string:expr, $($rest:tt)*) => (format!($string, $($rest)*).into());
-    ($report:expr, lazy $severity:ident, $($rest:tt)*) => {
+    ($report:expr, $severity:ident, $($rest:tt)*) => {
         $report.push(::report::ReportItem {
-            lazy: true,
+            strict: ::report::Strictness::Strict,
             severity: ::report::Severity::$severity,
             text: push!(@_format $($rest)*),
         })
     };
-    ($report:expr, $severity:ident, $($rest:tt)*) => {
+    ($report:expr, $strict:ident $severity:ident, $($rest:tt)*) => {
         $report.push(::report::ReportItem {
-            lazy: false,
+            strict: ::report::Strictness::$strict,
             severity: ::report::Severity::$severity,
             text: push!(@_format $($rest)*),
         })
-    }
+    };
 }
 
 macro_rules! changed {
@@ -103,7 +112,7 @@ macro_rules! changed {
     }
 }
 
-fn retain_mut<T, F>(vec: &mut Vec<T>, mut f: F)
+fn delete_if<T, F>(vec: &mut Vec<T>, mut f: F)
     where F: FnMut(&mut T) -> bool
 {
     let len = vec.len();
@@ -112,7 +121,7 @@ fn retain_mut<T, F>(vec: &mut Vec<T>, mut f: F)
         let v = &mut **vec;
 
         for i in 0..len {
-            if !f(&mut v[i]) {
+            if f(&mut v[i]) {
                 del += 1;
             } else if del > 0 {
                 v.swap(i - del, i);

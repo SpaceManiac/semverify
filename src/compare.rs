@@ -75,23 +75,18 @@ fn compare_mods(r: &mut Report, old: &Mod, new: &Mod) {
                     push!(r, Major, "removed");
                 } else if !result.found_pub {
                     push!(r, Major, "made private");
-                } else if !result.found_kind {
-                    push!(r, Major, "no longer a {}", kind);
                 } else if !result.item_cfg.subset(&result.found_cfgs) {
-                    push!(r, Major, "availability narrowed:\n  Was: {}\n  Now: {}", result.found_cfgs, result.item_cfg);
+                    push!(r, Major, "availability narrowed:\n  Was: {}\n  Now: {}", result.item_cfg, result.found_cfgs);
                 }
             }}
         }
 
         match item.node {
             // Child module: push to list for later consumption (improves tree structure)
-            Mod(ref module) => find_item!("mod"; |r, new| match new.node {
-                Mod(ref new_module) => {
-                    child_mods.push((item, module, new, new_module));
-                    true
-                }
-                _ => false
-            }),
+            Mod(ref module) => find_item!("mod"; |r, new| if let Mod(ref new_module) = new.node {
+                child_mods.push((item, module, new, new_module));
+                true
+            } else { false }),
 
             // TODO: Structs
             // See: Signatures in type definitions
@@ -177,9 +172,7 @@ fn compare_mods(r: &mut Report, old: &Mod, new: &Mod) {
                         (decl, generics, unsafety, abi),
                         (new_decl, new_generics, new_unsafety, new_abi));
                     true
-                } else {
-                    false
-                })
+                } else { false })
             }
             // Unhandled types
             _ => { push!(r, Warning, "Unhandled: {} {}", item.node.descriptive_variant(), item.ident); },
@@ -198,14 +191,12 @@ fn compare_mods(r: &mut Report, old: &Mod, new: &Mod) {
         macro_rules! find_item {
             ($kind_name:expr; $closure:expr) => {{
                 let kind = $kind_name;
-                let r = push!(r, lazy Note, "{} {}", kind, item.ident.name);
+                let r = push!(r, Lazy Note, "{} {}", kind, item.ident.name);
                 let result = search_items(r, item, old.items.iter().map(|x| &**x), $closure);
                 if !result.found_name {
                     push!(r, Minor, "added");
                 } else if !result.found_pub {
                     push!(r, Minor, "made public");
-                } else if !result.found_kind {
-                    push!(r, Major, "now a {}", kind);
                 } else if !result.item_cfg.subset(&result.found_cfgs) {
                     push!(r, Minor, "availability widened:\n  Was: {}\n  Now: {}", result.found_cfgs, result.item_cfg);
                 }
