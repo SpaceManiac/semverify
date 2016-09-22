@@ -1,4 +1,11 @@
 [package]
-authors = ["Tad Hardesty <tad@platymuus.com>"]
-name = "semcmp"
+name = "semverify"
 version = "0.1.0"
+authors = ["Tad Hardesty <tad@platymuus.com>"]
+
+description = "Semantic version verifier"
+readme = "README.md"
+license = "MIT"
+keywords = ["semver", "cargo", "version", "verifier"]
+
+repository = "https://github.com/SpaceManiac/semverify"
